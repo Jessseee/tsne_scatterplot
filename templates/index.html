@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Scatter Plot</title>
+        <script src="https://unpkg.com/d3"></script>
+        <script src="https://unpkg.com/d3fc"></script>
+        <script src="//unpkg.com/d3-svg-annotation@2.5.1/indexRollup.js"></script>
+        <style>
+           body {
+                color: #1b1e23;
+                font-size: small;
+                font-family: sans-serif;
+                height: calc(100vh);
+                margin: 0;
+                display: flex;
+            }
+
+            .domain, .gridline-y, .gridline-x, .annotation-line>line {
+                stroke: currentColor;
+                stroke-opacity: 0.1;
+            }
+
+            .right-axis {
+                width: 0 !important;
+            }
+
+            .bottom-axis {
+                height: 0 !important;
+            }
+            .annotation-note-bg {
+                fill-opacity: 0.8;
+            }
+
+            .annotation-note-label,
+            .annotation-note-title {
+                fill: black;
+                font-size: 0.8em;
+                max-width: 50px;
+                text-wrap: wrap;
+            }
+
+            #chart {
+                width: 50%;
+            }
+
+            #preview {
+                width: 50%;
+                overflow: auto;
+            }
+
+            #loading {
+                margin: auto;
+                font-size: 2em;
+            }
+        </style>
+    </head>
+    <body>
+        <div id="chart"></div>
+        <div id="loading"><span>Loading...</span></div>
+        <div id="preview"><img id="preview-image" src=""></div>
+        <script>
+            // Based on https://blog.scottlogic.com/2020/05/01/rendering-one-million-points-with-d3.html
+            document.addEventListener("DOMContentLoaded", () => {
+                fetch("/data")
+                    .then(response => response.json())
+                    .then(data => {
+                        document.getElementById("loading").style.display = "none";
+
+                        const xScale = d3.scaleLinear().domain(d3.extent(data, (d) => d.x))
+                        const yScale = d3.scaleLinear().domain(d3.extent(data, (d) => d.y))
+                        const xScaleOriginal = xScale.copy();
+                        const yScaleOriginal = yScale.copy();
+
+                        const fillColor = fc
+                            .webglFillColor()
+                            .value(d => {
+                                const color = d3.color(d.color).rgb().clamp();
+                                return [color.r/255, color.g/255, color.b/255, color.opacity]
+                            })
+                            .data(data)
+
+                        const pointSeries = fc
+                            .seriesWebglPoint()
+                            .equals((previousData, currentData) => previousData === currentData)
+                            .size(10)
+                            .crossValue(d => d.x)
+                            .mainValue(d => d.y)
+                            .decorate(d => fillColor(d));
+
+                        const zoom = d3
+                          .zoom()
+                          .on("zoom", event => {
+                              xScale.domain(event.transform.rescaleX(xScaleOriginal).domain());
+                              yScale.domain(event.transform.rescaleY(yScaleOriginal).domain());
+                              redraw();
+                          });
+
+                        const createAnnotationData = d => ({
+                            note: {
+                                label: `x: ${d.x} y:${d.y} path: ${d.path}`,
+                                bgPadding: 5,
+                                title: `${d.group} (${d.id})`
+                            },
+                            x: d.x,
+                            y: d.y,
+                            dx: 20,
+                            dy: 20
+                        });
+
+                        let annotations = []
+                        const quadtree = d3
+                            .quadtree()
+                            .x(d => d.x)
+                            .y(d => d.y)
+                            .addAll(data);
+
+                        const pointer = fc.pointer().on("point", ([coord]) => {
+                            annotations.pop();
+
+                            if (!coord || !quadtree) {
+                                return;
+                            }
+
+                            const x = xScale.invert(coord.x);
+                            const y = yScale.invert(coord.y);
+                            const radius = Math.abs(xScale.invert(coord.x) - xScale.invert(coord.x - 20));
+                            const closestDatum = quadtree.find(x, y, radius);
+
+                            if (closestDatum) {
+                                document.getElementById("preview-image").src = `file://${closestDatum.path}`
+                                annotations[0] = createAnnotationData(closestDatum);
+                            }
+
+                            redraw();
+                        });
+
+                        const seriesSvgAnnotation = () => {
+                           const d3Annotation = d3.annotation();
+
+                           let xScale = d3.scaleLinear();
+                           let yScale = d3.scaleLinear();
+
+                           const join = fc.dataJoin("g", "annotation");
+
+                           const series = selection => {
+                               selection.each((data, index, group) => {
+                                   const projectedData = data.map(d => ({
+                                       ...d,
+                                       x: xScale(d.x),
+                                       y: yScale(d.y)
+                                   }));
+
+                               d3Annotation.annotations(projectedData);
+
+                               join(d3.select(group[index]), projectedData).call(d3Annotation);
+                             });
+                           };
+
+                           series.xScale = (...args) => {
+                             if (!args.length) {
+                               return xScale;
+                             }
+                             xScale = args[0];
+                             return series;
+                           };
+
+                           series.yScale = (...args) => {
+                             if (!args.length) {
+                               return yScale;
+                             }
+                             yScale = args[0];
+                             return series;
+                           };
+
+                           fc.rebindAll(series, d3Annotation);
+
+                           return series;
+                        };
+
+                        const annotationSeries = seriesSvgAnnotation()
+                           .notePadding(15)
+                           .type(d3.annotationCallout);
+
+                        const chart = fc
+                            .chartCartesian(xScale, yScale)
+                            .webglPlotArea(
+                                fc
+                                   .seriesWebglMulti()
+                                   .series([pointSeries])
+                                   .mapping(d => d.data)
+                            )
+                            .svgPlotArea(
+                                fc
+                                   .seriesSvgMulti()
+                                   .series([annotationSeries])
+                                   .mapping(d => d.annotations)
+                            )
+                            .decorate(sel => {
+                                sel.enter()
+                                    .selectAll('.x-axis')
+                                    .on('measure.range', event => {
+                                        xScaleOriginal.range([0, event.detail.width]);
+                                    });
+                                sel.enter()
+                                    .selectAll('.y-axis')
+                                    .on('measure.range', event => {
+                                        yScaleOriginal.range([event.detail.height, 0]);
+                                    });
+                                sel.enter()
+                                    .select('d3fc-svg.plot-area')
+                                    .call(zoom)
+                                    .call(pointer);
+                            });
+
+                        const redraw = () => {
+                            d3.select("#chart")
+                                .datum({ annotations, data })
+                                .call(chart);
+                        };
+
+                        redraw();
+                    });
+            });
+        </script>
+    </body>
+</html>
